@@ -1706,7 +1706,7 @@ async def streamer_chat_endpoint(request: StreamerChatRequest):
     total_start = time.perf_counter()
 
     # Hardcoded settings
-    VOICE = "MickeyMouse.mp3"
+    VOICE = "Layla.wav"
     STYLE = "friendly"
     INCLUDE_TAGS = True
     OUTPUT_FORMAT = "wav"
