@@ -56,13 +56,12 @@ def _detect_best_backend() -> str:
         return None
 
 
-def load_model(model_name: str = "HuggingFaceTB/SmolLM2-1.7B-Instruct") -> bool:
+def load_model(model_name: str = "HuggingFaceTB/SmolLM3-3B") -> bool:
     """
     Load the LLM model using the best available backend.
 
     Args:
-        model_name: HuggingFace model name. Defaults to SmolLM2-1.7B-Instruct
-                   which is smaller and faster than SmolLM3-3B.
+        model_name: HuggingFace model name. Defaults to SmolLM3-3B.
     """
     global _model, _tokenizer, _pipeline, MODEL_LOADED, BACKEND
 
@@ -87,10 +86,6 @@ def load_model(model_name: str = "HuggingFaceTB/SmolLM2-1.7B-Instruct") -> bool:
 def _load_mlx(model_name: str) -> bool:
     """Load model using MLX backend (Mac)."""
     global _model, _tokenizer, MODEL_LOADED
-
-    # Use SmolLM3 on Mac since MLX handles it well
-    if "SmolLM2" in model_name:
-        model_name = "HuggingFaceTB/SmolLM3-3B"
 
     logger.info(f"Loading model with MLX: {model_name}")
     from mlx_lm import load
