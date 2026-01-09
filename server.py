@@ -3,6 +3,10 @@
 # Handles API requests for text-to-speech generation, UI serving,
 # configuration management, and file uploads.
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 import os
 import io
 import logging
@@ -1788,6 +1792,90 @@ async def streamer_chat_endpoint(request: StreamerChatRequest):
         raise
     except Exception as e:
         logger.error(f"Streamer chat failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/streamer-chat-elevenlabs", tags=["Streamer Chat"], response_model=StreamerChatResponse)
+async def streamer_chat_elevenlabs_endpoint(request: StreamerChatRequest):
+    """
+    Streamer chat endpoint using ElevenLabs TTS instead of Chatterbox.
+
+    Takes username and message, returns response text + audio as base64.
+    Requires ELEVENLABS_API_KEY environment variable.
+    """
+    import time
+    import base64
+    import os
+
+    total_start = time.perf_counter()
+
+    # ElevenLabs settings
+    VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"  # George voice
+    MODEL_ID = "eleven_multilingual_v2"
+    OUTPUT_FORMAT = "mp3_44100_128"
+    STYLE = "friendly"
+    INCLUDE_TAGS = False  # ElevenLabs doesn't support paralinguistic tags
+
+    logger.info(f"[STREAMER-11L] Chat from {request.username}: {request.message[:50]}...")
+
+    # Step 1: Generate response (same as regular endpoint)
+    llm_start = time.perf_counter()
+    response_text = script_generator.generate_response(
+        username=request.username,
+        message=request.message,
+        style=STYLE,
+        include_tags=INCLUDE_TAGS,
+    )
+    llm_time = (time.perf_counter() - llm_start) * 1000
+
+    if response_text is None:
+        raise HTTPException(status_code=500, detail="Failed to generate response.")
+
+    logger.info(f"[BENCH] LLM: {llm_time:.1f}ms | Response: {response_text[:80]}...")
+
+    # Step 2: Call ElevenLabs TTS
+    try:
+        from elevenlabs.client import ElevenLabs
+
+        api_key = os.getenv("ELEVENLABS_API_KEY")
+        if not api_key:
+            raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY not set")
+
+        tts_start = time.perf_counter()
+
+        elevenlabs = ElevenLabs(api_key=api_key)
+        audio_generator = elevenlabs.text_to_speech.convert(
+            text=response_text,
+            voice_id=VOICE_ID,
+            model_id=MODEL_ID,
+            output_format=OUTPUT_FORMAT,
+        )
+
+        # Convert generator to bytes
+        audio_bytes = b"".join(audio_generator)
+        tts_time = (time.perf_counter() - tts_start) * 1000
+
+        logger.info(f"[BENCH] ElevenLabs TTS: {tts_time:.1f}ms")
+
+        # Convert to base64
+        audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+
+        total_time = (time.perf_counter() - total_start) * 1000
+        logger.info(f"[BENCH] === TOTAL: {total_time:.1f}ms (LLM: {llm_time:.1f}ms, TTS: {tts_time:.1f}ms) ===")
+
+        return StreamerChatResponse(
+            response_text=response_text,
+            audio_base64=audio_base64,
+            audio_format="mp3",
+        )
+
+    except HTTPException:
+        raise
+    except ImportError:
+        logger.error("elevenlabs package not installed. Run: pip install elevenlabs")
+        raise HTTPException(status_code=500, detail="ElevenLabs SDK not installed")
+    except Exception as e:
+        logger.error(f"ElevenLabs TTS failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
