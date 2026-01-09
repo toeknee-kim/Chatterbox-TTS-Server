@@ -1,7 +1,10 @@
 # File: script_generator.py
-# SmolLM3 script generator using MLX for Apple Silicon
+# SmolLM3 script generator with cross-platform support
+# - Mac (Apple Silicon): Uses MLX for fast inference
+# - Windows/Linux: Uses Transformers + PyTorch (CUDA or CPU)
 
 import logging
+import platform
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -9,7 +12,9 @@ logger = logging.getLogger(__name__)
 # Global model instances
 _model = None
 _tokenizer = None
+_pipeline = None  # For transformers backend
 MODEL_LOADED = False
+BACKEND = None  # "mlx" or "transformers"
 
 # Paralinguistic tags supported by Chatterbox Turbo
 PARALINGUISTIC_TAGS = [
@@ -29,38 +34,122 @@ Rules:
 5. Output ONLY your spoken words/no_think"""
 
 
-def load_model(model_name: str = "HuggingFaceTB/SmolLM3-3B") -> bool:
-    """Load the SmolLM3 model using MLX."""
-    global _model, _tokenizer, MODEL_LOADED
+def _detect_best_backend() -> str:
+    """Detect the best available backend for the current platform."""
+    # Try MLX first (Mac only)
+    if platform.system() == "Darwin":
+        try:
+            import mlx_lm
+            logger.info("MLX backend available (Apple Silicon)")
+            return "mlx"
+        except ImportError:
+            logger.info("MLX not available, trying transformers...")
+
+    # Fall back to transformers
+    try:
+        import transformers
+        import torch
+        logger.info(f"Transformers backend available (PyTorch device: {'cuda' if torch.cuda.is_available() else 'cpu'})")
+        return "transformers"
+    except ImportError:
+        logger.error("No LLM backend available. Install mlx-lm (Mac) or transformers (Windows/Linux)")
+        return None
+
+
+def load_model(model_name: str = "HuggingFaceTB/SmolLM2-1.7B-Instruct") -> bool:
+    """
+    Load the LLM model using the best available backend.
+
+    Args:
+        model_name: HuggingFace model name. Defaults to SmolLM2-1.7B-Instruct
+                   which is smaller and faster than SmolLM3-3B.
+    """
+    global _model, _tokenizer, _pipeline, MODEL_LOADED, BACKEND
 
     if MODEL_LOADED:
-        logger.info("SmolLM3 model already loaded.")
+        logger.info(f"LLM model already loaded (backend: {BACKEND})")
         return True
+
+    BACKEND = _detect_best_backend()
+    if BACKEND is None:
+        return False
 
     try:
-        logger.info(f"Loading SmolLM3 model: {model_name}")
-        from mlx_lm import load
-
-        _model, _tokenizer = load(model_name)
-        MODEL_LOADED = True
-        logger.info("SmolLM3 model loaded successfully.")
-        return True
-
-    except ImportError:
-        logger.error("mlx-lm not installed. Run: pip install mlx-lm")
-        return False
+        if BACKEND == "mlx":
+            return _load_mlx(model_name)
+        else:
+            return _load_transformers(model_name)
     except Exception as e:
-        logger.error(f"Failed to load SmolLM3 model: {e}")
+        logger.error(f"Failed to load model: {e}")
         return False
+
+
+def _load_mlx(model_name: str) -> bool:
+    """Load model using MLX backend (Mac)."""
+    global _model, _tokenizer, MODEL_LOADED
+
+    # Use SmolLM3 on Mac since MLX handles it well
+    if "SmolLM2" in model_name:
+        model_name = "HuggingFaceTB/SmolLM3-3B"
+
+    logger.info(f"Loading model with MLX: {model_name}")
+    from mlx_lm import load
+
+    _model, _tokenizer = load(model_name)
+    MODEL_LOADED = True
+    logger.info("MLX model loaded successfully.")
+    return True
+
+
+def _load_transformers(model_name: str) -> bool:
+    """Load model using Transformers backend (Windows/Linux)."""
+    global _model, _tokenizer, _pipeline, MODEL_LOADED
+
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+
+    # Determine device
+    if torch.cuda.is_available():
+        device = "cuda"
+        torch_dtype = torch.float16
+    else:
+        device = "cpu"
+        torch_dtype = torch.float32
+
+    logger.info(f"Loading model with Transformers on {device}: {model_name}")
+
+    _tokenizer = AutoTokenizer.from_pretrained(model_name)
+    _model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch_dtype,
+        device_map=device if device == "cuda" else None,
+    )
+
+    if device == "cpu":
+        _model = _model.to(device)
+
+    # Create pipeline for easier generation
+    _pipeline = pipeline(
+        "text-generation",
+        model=_model,
+        tokenizer=_tokenizer,
+        device=0 if device == "cuda" else -1,
+    )
+
+    MODEL_LOADED = True
+    logger.info(f"Transformers model loaded successfully on {device}.")
+    return True
 
 
 def unload_model():
     """Unload the model to free memory."""
-    global _model, _tokenizer, MODEL_LOADED
+    global _model, _tokenizer, _pipeline, MODEL_LOADED, BACKEND
     _model = None
     _tokenizer = None
+    _pipeline = None
     MODEL_LOADED = False
-    logger.info("SmolLM3 model unloaded.")
+    BACKEND = None
+    logger.info("LLM model unloaded.")
 
 
 def generate_script(
@@ -81,7 +170,7 @@ def generate_script(
     Returns:
         Generated script text or None if failed
     """
-    global _model, _tokenizer, MODEL_LOADED
+    global _model, _tokenizer, _pipeline, MODEL_LOADED, BACKEND
 
     if not MODEL_LOADED:
         if not load_model():
@@ -90,8 +179,6 @@ def generate_script(
     try:
         import time
         import re
-        from mlx_lm import generate
-        from mlx_lm.sample_utils import make_sampler
 
         total_start = time.perf_counter()
 
@@ -101,38 +188,18 @@ def generate_script(
             {"role": "user", "content": prompt}
         ]
 
-        # Apply chat template
-        template_start = time.perf_counter()
-        formatted_prompt = _tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
-        template_time = (time.perf_counter() - template_start) * 1000
+        if BACKEND == "mlx":
+            response = _generate_mlx(messages, max_tokens, temperature, top_p)
+        else:
+            response = _generate_transformers(messages, max_tokens, temperature, top_p)
 
-        logger.info(f"[BENCH] Template applied in {template_time:.1f}ms")
-        logger.info(f"Generating script for prompt: {prompt[:100]}...")
-
-        # Create sampler with temperature and top_p
-        sampler = make_sampler(temp=temperature, top_p=top_p)
-
-        # Generate response
-        generate_start = time.perf_counter()
-        response = generate(
-            _model,
-            _tokenizer,
-            prompt=formatted_prompt,
-            max_tokens=max_tokens,
-            sampler=sampler,
-        )
-        generate_time = (time.perf_counter() - generate_start) * 1000
-
-        logger.info(f"[BENCH] LLM generation took {generate_time:.1f}ms")
+        if response is None:
+            return None
 
         # Clean up the response - remove thinking tags
         script = response.strip()
 
-        # Remove <think>...</think> blocks (SmolLM3 reasoning)
+        # Remove <think>...</think> blocks (SmolLM reasoning)
         script = re.sub(r'<think>.*?</think>', '', script, flags=re.DOTALL)
         script = script.strip()
 
@@ -144,6 +211,73 @@ def generate_script(
     except Exception as e:
         logger.error(f"Script generation failed: {e}")
         return None
+
+
+def _generate_mlx(messages: list, max_tokens: int, temperature: float, top_p: float) -> Optional[str]:
+    """Generate using MLX backend."""
+    import time
+    from mlx_lm import generate
+    from mlx_lm.sample_utils import make_sampler
+
+    # Apply chat template
+    template_start = time.perf_counter()
+    formatted_prompt = _tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+    template_time = (time.perf_counter() - template_start) * 1000
+    logger.info(f"[BENCH] Template applied in {template_time:.1f}ms")
+
+    # Create sampler with temperature and top_p
+    sampler = make_sampler(temp=temperature, top_p=top_p)
+
+    # Generate response
+    generate_start = time.perf_counter()
+    response = generate(
+        _model,
+        _tokenizer,
+        prompt=formatted_prompt,
+        max_tokens=max_tokens,
+        sampler=sampler,
+    )
+    generate_time = (time.perf_counter() - generate_start) * 1000
+    logger.info(f"[BENCH] MLX generation took {generate_time:.1f}ms")
+
+    return response
+
+
+def _generate_transformers(messages: list, max_tokens: int, temperature: float, top_p: float) -> Optional[str]:
+    """Generate using Transformers backend."""
+    import time
+
+    # Apply chat template
+    template_start = time.perf_counter()
+    formatted_prompt = _tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+    template_time = (time.perf_counter() - template_start) * 1000
+    logger.info(f"[BENCH] Template applied in {template_time:.1f}ms")
+
+    # Generate response
+    generate_start = time.perf_counter()
+    outputs = _pipeline(
+        formatted_prompt,
+        max_new_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        do_sample=True,
+        pad_token_id=_tokenizer.eos_token_id,
+        return_full_text=False,
+    )
+    generate_time = (time.perf_counter() - generate_start) * 1000
+    logger.info(f"[BENCH] Transformers generation took {generate_time:.1f}ms")
+
+    if outputs and len(outputs) > 0:
+        return outputs[0]["generated_text"]
+    return None
 
 
 def generate_response(
