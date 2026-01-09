@@ -66,6 +66,7 @@ from models import (  # Pydantic models
     UpdateStatusResponse,
 )
 import utils  # Utility functions
+import script_generator  # SmolLM3 script generation
 
 from pydantic import BaseModel, Field
 
@@ -162,6 +163,13 @@ async def lifespan(app: FastAPI):
                 daemon=True,
             )
             browser_thread.start()
+
+        # Load SmolLM3 for script generation
+        logger.info("Loading SmolLM3 model for script generation...")
+        if script_generator.load_model():
+            logger.info("SmolLM3 model loaded successfully.")
+        else:
+            logger.warning("SmolLM3 model failed to load. Script generation will retry on first use.")
 
         logger.info("Application startup sequence complete.")
         startup_complete_event.set()
@@ -402,6 +410,17 @@ async def get_web_ui(request: Request):
             "Please check server logs for more details.</p></body></html>",
             status_code=500,
         )
+
+
+# --- Simple UI Route ---
+@app.get("/simple", response_class=HTMLResponse, include_in_schema=False)
+async def get_simple_ui():
+    """Serves the simple web interface (simple.html)."""
+    logger.info("Request received for simple UI page ('/simple').")
+    simple_html_path = Path("ui/simple.html")
+    if simple_html_path.exists():
+        return HTMLResponse(content=simple_html_path.read_text(), status_code=200)
+    return HTMLResponse("<html><body><h1>Simple UI not found</h1></body></html>", status_code=404)
 
 
 # --- API Endpoint for Model Information ---
@@ -1329,6 +1348,468 @@ async def openai_speech_endpoint(request: OpenAISpeechRequest):
     except Exception as e:
         logger.error(f"Error in openai_speech_endpoint: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- Script Generation Endpoints ---
+
+class ChatResponseRequest(BaseModel):
+    """Request model for chat response generation."""
+    username: str = Field(..., min_length=1, description="Name of the user sending the message")
+    message: str = Field(..., min_length=1, description="The user's message to respond to")
+    style: Literal["friendly", "excited", "calm", "sarcastic", "professional"] = Field(
+        "friendly", description="Response style"
+    )
+    include_tags: bool = Field(
+        True, description="Include paralinguistic tags like [laugh], [sigh]"
+    )
+
+
+class ChatAndSpeakRequest(BaseModel):
+    """Request model for chat response + TTS."""
+    username: str = Field(..., min_length=1, description="Name of the user")
+    message: str = Field(..., min_length=1, description="The user's message")
+    style: Literal["friendly", "excited", "calm", "sarcastic", "professional"] = Field(
+        "friendly", description="Response style"
+    )
+    include_tags: bool = Field(True, description="Include paralinguistic tags")
+    voice: str = Field("Emily.wav", description="Voice preset filename")
+    output_format: Literal["wav", "opus", "mp3"] = Field("wav", description="Audio output format")
+
+
+class ScriptGenerationRequest(BaseModel):
+    """Request model for script generation."""
+    prompt: str = Field(..., min_length=1, description="Topic or scenario for the script")
+    style: Literal["conversational", "formal", "excited", "calm", "nervous"] = Field(
+        "conversational", description="Speaking style"
+    )
+    length: Literal["short", "medium", "long"] = Field(
+        "medium", description="Script length"
+    )
+    include_tags: bool = Field(
+        True, description="Include paralinguistic tags like [laugh], [sigh]"
+    )
+
+
+class ScriptGenerationResponse(BaseModel):
+    """Response model for script generation."""
+    script: str = Field(..., description="Generated script text")
+    prompt: str = Field(..., description="Original prompt")
+
+
+class GenerateAndSpeakRequest(BaseModel):
+    """Request model for combined script generation and TTS."""
+    prompt: str = Field(..., min_length=1, description="Topic or scenario for the script")
+    style: Literal["conversational", "formal", "excited", "calm", "nervous"] = Field(
+        "conversational", description="Speaking style"
+    )
+    length: Literal["short", "medium", "long"] = Field(
+        "medium", description="Script length"
+    )
+    include_tags: bool = Field(
+        True, description="Include paralinguistic tags"
+    )
+    voice: str = Field(
+        "Emily.wav", description="Voice preset filename"
+    )
+    output_format: Literal["wav", "opus", "mp3"] = Field(
+        "wav", description="Audio output format"
+    )
+
+
+@app.post("/generate-script", tags=["Script Generation"], response_model=ScriptGenerationResponse)
+async def generate_script_endpoint(request: ScriptGenerationRequest):
+    """
+    Generate a speech script using SmolLM3.
+
+    The script will be formatted for natural speech with optional
+    paralinguistic tags like [laugh], [sigh], [cough], etc.
+    """
+    logger.info(f"Script generation request: {request.prompt[:50]}...")
+
+    if not script_generator.MODEL_LOADED:
+        logger.info("Loading SmolLM3 model for first time...")
+
+    script = script_generator.generate_script_for_topic(
+        topic=request.prompt,
+        style=request.style,
+        length=request.length,
+        include_tags=request.include_tags,
+    )
+
+    if script is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to generate script. Check server logs for details."
+        )
+
+    return ScriptGenerationResponse(script=script, prompt=request.prompt)
+
+
+@app.get("/script-presets", tags=["Script Generation"])
+async def get_script_presets():
+    """Get available script generation presets."""
+    return {
+        "presets": script_generator.SCRIPT_PRESETS,
+        "styles": ["conversational", "formal", "excited", "calm", "nervous"],
+        "lengths": ["short", "medium", "long"],
+        "paralinguistic_tags": script_generator.PARALINGUISTIC_TAGS,
+    }
+
+
+@app.post("/generate-and-speak", tags=["Script Generation"])
+async def generate_and_speak_endpoint(
+    request: GenerateAndSpeakRequest,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Generate a speech script and immediately convert it to audio.
+
+    This combines SmolLM3 script generation with Chatterbox TTS
+    in a single request.
+    """
+    logger.info(f"Generate-and-speak request: {request.prompt[:50]}...")
+
+    # Step 1: Generate the script
+    script = script_generator.generate_script_for_topic(
+        topic=request.prompt,
+        style=request.style,
+        length=request.length,
+        include_tags=request.include_tags,
+    )
+
+    if script is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to generate script."
+        )
+
+    logger.info(f"Generated script: {script[:100]}...")
+
+    # Step 2: Check TTS model
+    if not engine.MODEL_LOADED:
+        raise HTTPException(
+            status_code=503,
+            detail="TTS engine model is not loaded."
+        )
+
+    # Step 3: Resolve voice path
+    voices_dir = get_predefined_voices_path(ensure_absolute=True)
+    voice_path = voices_dir / request.voice
+
+    if not voice_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Voice file '{request.voice}' not found."
+        )
+
+    # Step 4: Synthesize audio
+    try:
+        audio_tensor, sr = engine.synthesize(
+            text=script,
+            audio_prompt_path=str(voice_path),
+            temperature=get_gen_default_temperature(),
+            exaggeration=get_gen_default_exaggeration(),
+            cfg_weight=get_gen_default_cfg_weight(),
+            seed=get_gen_default_seed(),
+        )
+
+        if audio_tensor is None:
+            raise HTTPException(status_code=500, detail="TTS synthesis failed.")
+
+        # Convert to numpy
+        audio_np = audio_tensor.cpu().numpy()
+        if audio_np.ndim == 2:
+            audio_np = audio_np.squeeze()
+
+        # Encode audio
+        encoded_audio = utils.encode_audio(
+            audio_array=audio_np,
+            sample_rate=sr,
+            output_format=request.output_format,
+            target_sample_rate=get_audio_sample_rate(),
+        )
+
+        if encoded_audio is None:
+            raise HTTPException(status_code=500, detail="Failed to encode audio.")
+
+        media_type = f"audio/{request.output_format}"
+
+        # Include script in header for reference
+        headers = {
+            "X-Generated-Script": script[:200].replace("\n", " "),
+            "Content-Disposition": f"attachment; filename=generated_speech.{request.output_format}",
+        }
+
+        return StreamingResponse(
+            io.BytesIO(encoded_audio),
+            media_type=media_type,
+            headers=headers,
+        )
+
+    except Exception as e:
+        logger.error(f"TTS synthesis failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/chat", tags=["Chat Response"])
+async def chat_response_endpoint(request: ChatResponseRequest):
+    """
+    Generate a conversational response to a user's message.
+
+    Takes a username and message, returns a natural spoken response.
+    """
+    logger.info(f"Chat request from {request.username}: {request.message[:50]}...")
+
+    response_text = script_generator.generate_response(
+        username=request.username,
+        message=request.message,
+        style=request.style,
+        include_tags=request.include_tags,
+    )
+
+    if response_text is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to generate response."
+        )
+
+    return {"response": response_text, "username": request.username}
+
+
+@app.post("/chat-and-speak", tags=["Chat Response"])
+async def chat_and_speak_endpoint(request: ChatAndSpeakRequest):
+    """
+    Generate a response to a user's message and convert it to speech.
+
+    Combines SmolLM3 response generation with Chatterbox TTS.
+    """
+    import time
+    total_start = time.perf_counter()
+
+    logger.info(f"Chat-and-speak from {request.username}: {request.message[:50]}...")
+
+    # Step 1: Generate response
+    llm_start = time.perf_counter()
+    response_text = script_generator.generate_response(
+        username=request.username,
+        message=request.message,
+        style=request.style,
+        include_tags=request.include_tags,
+    )
+    llm_time = (time.perf_counter() - llm_start) * 1000
+
+    if response_text is None:
+        raise HTTPException(status_code=500, detail="Failed to generate response.")
+
+    logger.info(f"[BENCH] LLM response: {llm_time:.1f}ms")
+    logger.info(f"Generated response: {response_text[:100]}...")
+
+    # Step 2: Check TTS model
+    if not engine.MODEL_LOADED:
+        raise HTTPException(status_code=503, detail="TTS engine model is not loaded.")
+
+    # Step 3: Resolve voice path
+    voices_dir = get_predefined_voices_path(ensure_absolute=True)
+    voice_path = voices_dir / request.voice
+
+    if not voice_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Voice file '{request.voice}' not found.")
+
+    # Step 4: Synthesize audio
+    try:
+        tts_start = time.perf_counter()
+        audio_tensor, sr = engine.synthesize(
+            text=response_text,
+            audio_prompt_path=str(voice_path),
+            temperature=get_gen_default_temperature(),
+            exaggeration=get_gen_default_exaggeration(),
+            cfg_weight=get_gen_default_cfg_weight(),
+            seed=get_gen_default_seed(),
+        )
+        tts_time = (time.perf_counter() - tts_start) * 1000
+
+        if audio_tensor is None:
+            raise HTTPException(status_code=500, detail="TTS synthesis failed.")
+
+        logger.info(f"[BENCH] TTS synthesis: {tts_time:.1f}ms")
+
+        # Step 5: Convert to numpy
+        convert_start = time.perf_counter()
+        audio_np = audio_tensor.cpu().numpy()
+        if audio_np.ndim == 2:
+            audio_np = audio_np.squeeze()
+        convert_time = (time.perf_counter() - convert_start) * 1000
+
+        logger.info(f"[BENCH] Audio convert: {convert_time:.1f}ms")
+
+        # Step 6: Encode audio
+        encode_start = time.perf_counter()
+        encoded_audio = utils.encode_audio(
+            audio_array=audio_np,
+            sample_rate=sr,
+            output_format=request.output_format,
+            target_sample_rate=get_audio_sample_rate(),
+        )
+        encode_time = (time.perf_counter() - encode_start) * 1000
+
+        if encoded_audio is None:
+            raise HTTPException(status_code=500, detail="Failed to encode audio.")
+
+        logger.info(f"[BENCH] Audio encode: {encode_time:.1f}ms")
+
+        total_time = (time.perf_counter() - total_start) * 1000
+        logger.info(f"[BENCH] === TOTAL: {total_time:.1f}ms (LLM: {llm_time:.1f}ms, TTS: {tts_time:.1f}ms) ===")
+
+        headers = {
+            "X-Response-Text": response_text[:200].replace("\n", " "),
+            "X-Bench-Total-Ms": str(int(total_time)),
+            "X-Bench-LLM-Ms": str(int(llm_time)),
+            "X-Bench-TTS-Ms": str(int(tts_time)),
+            "Content-Disposition": f"attachment; filename=response.{request.output_format}",
+        }
+
+        return StreamingResponse(
+            io.BytesIO(encoded_audio),
+            media_type=f"audio/{request.output_format}",
+            headers=headers,
+        )
+
+    except Exception as e:
+        logger.error(f"TTS synthesis failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class StreamerChatRequest(BaseModel):
+    """Simplified request for streamer chat response."""
+    username: str = Field(..., min_length=1, description="Chatter's username")
+    message: str = Field(..., min_length=1, description="Chat message")
+
+
+class StreamerChatResponse(BaseModel):
+    """Response with text and audio."""
+    response_text: str = Field(..., description="Generated response text")
+    audio_base64: str = Field(..., description="Base64 encoded audio")
+    audio_format: str = Field(..., description="Audio format (wav)")
+
+
+@app.post("/streamer-chat", tags=["Streamer Chat"], response_model=StreamerChatResponse)
+async def streamer_chat_endpoint(request: StreamerChatRequest):
+    """
+    Simplified endpoint for Twitch streamer chat responses.
+
+    Takes username and message, returns response text + audio as base64.
+    Voice and style are hardcoded for consistency.
+    """
+    import time
+    import base64
+
+    total_start = time.perf_counter()
+
+    # Hardcoded settings
+    VOICE = "MickeyMouse.mp3"
+    STYLE = "friendly"
+    INCLUDE_TAGS = True
+    OUTPUT_FORMAT = "wav"
+
+    logger.info(f"[STREAMER] Chat from {request.username}: {request.message[:50]}...")
+
+    # Step 1: Generate response
+    llm_start = time.perf_counter()
+    response_text = script_generator.generate_response(
+        username=request.username,
+        message=request.message,
+        style=STYLE,
+        include_tags=INCLUDE_TAGS,
+    )
+    llm_time = (time.perf_counter() - llm_start) * 1000
+
+    if response_text is None:
+        raise HTTPException(status_code=500, detail="Failed to generate response.")
+
+    logger.info(f"[BENCH] LLM: {llm_time:.1f}ms | Response: {response_text[:80]}...")
+
+    # Step 2: Check TTS model
+    if not engine.MODEL_LOADED:
+        raise HTTPException(status_code=503, detail="TTS engine not loaded.")
+
+    # Step 3: Get voice path
+    voices_dir = get_predefined_voices_path(ensure_absolute=True)
+    voice_path = voices_dir / VOICE
+
+    if not voice_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Voice '{VOICE}' not found.")
+
+    # Step 4: Synthesize audio
+    try:
+        tts_start = time.perf_counter()
+        audio_tensor, sr = engine.synthesize(
+            text=response_text,
+            audio_prompt_path=str(voice_path),
+            temperature=get_gen_default_temperature(),
+            exaggeration=get_gen_default_exaggeration(),
+            cfg_weight=get_gen_default_cfg_weight(),
+            seed=get_gen_default_seed(),
+        )
+        tts_time = (time.perf_counter() - tts_start) * 1000
+
+        if audio_tensor is None:
+            raise HTTPException(status_code=500, detail="TTS synthesis failed.")
+
+        logger.info(f"[BENCH] TTS: {tts_time:.1f}ms")
+
+        # Step 5: Convert and encode
+        audio_np = audio_tensor.cpu().numpy()
+        if audio_np.ndim == 2:
+            audio_np = audio_np.squeeze()
+
+        encoded_audio = utils.encode_audio(
+            audio_array=audio_np,
+            sample_rate=sr,
+            output_format=OUTPUT_FORMAT,
+            target_sample_rate=get_audio_sample_rate(),
+        )
+
+        if encoded_audio is None:
+            raise HTTPException(status_code=500, detail="Failed to encode audio.")
+
+        # Convert to base64
+        audio_base64 = base64.b64encode(encoded_audio).decode('utf-8')
+
+        total_time = (time.perf_counter() - total_start) * 1000
+        logger.info(f"[BENCH] === TOTAL: {total_time:.1f}ms (LLM: {llm_time:.1f}ms, TTS: {tts_time:.1f}ms) ===")
+
+        return StreamerChatResponse(
+            response_text=response_text,
+            audio_base64=audio_base64,
+            audio_format=OUTPUT_FORMAT,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Streamer chat failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/script-model-status", tags=["Script Generation"])
+async def get_script_model_status():
+    """Check if the SmolLM3 model is loaded."""
+    return {
+        "loaded": script_generator.MODEL_LOADED,
+        "model": "SmolLM3-3B" if script_generator.MODEL_LOADED else None,
+    }
+
+
+@app.post("/load-script-model", tags=["Script Generation"])
+async def load_script_model():
+    """Manually load the SmolLM3 model."""
+    success = script_generator.load_model()
+    if not success:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to load SmolLM3 model. Ensure mlx-lm is installed."
+        )
+    return {"status": "loaded", "model": "SmolLM3-3B"}
 
 
 # --- Main Execution ---

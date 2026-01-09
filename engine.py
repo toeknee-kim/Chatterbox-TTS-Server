@@ -16,11 +16,12 @@ from chatterbox.models.s3gen.const import (
 
 # Defensive Turbo import - Turbo may not be available in older package versions
 try:
-    from chatterbox.tts_turbo import ChatterboxTurboTTS
+    from chatterbox.tts_turbo import ChatterboxTurboTTS, Conditionals
 
     TURBO_AVAILABLE = True
 except ImportError:
     ChatterboxTurboTTS = None
+    Conditionals = None
     TURBO_AVAILABLE = False
 
 # Import the singleton config_manager
@@ -69,6 +70,10 @@ model_device: Optional[str] = (
 # Track which model type is loaded
 loaded_model_type: Optional[str] = None  # "original" or "turbo"
 loaded_model_class_name: Optional[str] = None  # "ChatterboxTTS" or "ChatterboxTurboTTS"
+
+# Cache for pre-computed voice conditionals (Turbo model only)
+# Maps voice filename (str) -> Conditionals object
+_conditionals_cache: dict = {}
 
 
 def set_seed(seed_value: int):
@@ -337,6 +342,56 @@ def load_model() -> bool:
         return False
 
 
+def load_cached_conditionals(audio_path: str) -> bool:
+    """
+    Load pre-computed conditionals from a .conds file if available.
+
+    Args:
+        audio_path: Path to the voice audio file
+
+    Returns:
+        True if pre-computed conditionals were loaded, False otherwise
+    """
+    global chatterbox_model, _conditionals_cache
+
+    if not TURBO_AVAILABLE or Conditionals is None:
+        return False
+
+    if loaded_model_type != "turbo":
+        return False
+
+    audio_path_obj = Path(audio_path)
+    conds_path = audio_path_obj.with_suffix('.conds')
+
+    # Check cache first
+    cache_key = str(audio_path_obj)
+    if cache_key in _conditionals_cache:
+        chatterbox_model.conds = _conditionals_cache[cache_key]
+        logger.debug(f"Using cached conditionals for: {audio_path_obj.name}")
+        return True
+
+    # Check if .conds file exists
+    if not conds_path.exists():
+        return False
+
+    try:
+        logger.info(f"Loading pre-computed conditionals from: {conds_path}")
+        # Load to CPU first for MPS compatibility, then move to device
+        conds = Conditionals.load(conds_path, map_location="cpu")
+        conds = conds.to(model_device)
+
+        # Cache and set on model
+        _conditionals_cache[cache_key] = conds
+        chatterbox_model.conds = conds
+
+        logger.info(f"Successfully loaded pre-computed conditionals for: {audio_path_obj.name}")
+        return True
+
+    except Exception as e:
+        logger.warning(f"Failed to load pre-computed conditionals: {e}")
+        return False
+
+
 def synthesize(
     text: str,
     audio_prompt_path: Optional[str] = None,
@@ -382,10 +437,18 @@ def synthesize(
             f"exag={exaggeration}, cfg_weight={cfg_weight}, seed_applied_globally_if_nonzero={seed}"
         )
 
+        # Try to use pre-computed conditionals for faster inference (Turbo model only)
+        use_cached_conds = False
+        if audio_prompt_path and loaded_model_type == "turbo":
+            use_cached_conds = load_cached_conditionals(audio_prompt_path)
+            if use_cached_conds:
+                logger.info(f"Using pre-computed conditionals (skipping embedding extraction)")
+
         # Call the core model's generate method
+        # If we loaded cached conditionals, pass None for audio_prompt_path to skip re-extraction
         wav_tensor = chatterbox_model.generate(
             text=text,
-            audio_prompt_path=audio_prompt_path,
+            audio_prompt_path=None if use_cached_conds else audio_prompt_path,
             temperature=temperature,
             exaggeration=exaggeration,
             cfg_weight=cfg_weight,
@@ -409,6 +472,7 @@ def reload_model() -> bool:
         bool: True if the new model loaded successfully, False otherwise.
     """
     global chatterbox_model, MODEL_LOADED, model_device, loaded_model_type, loaded_model_class_name
+    global _conditionals_cache
 
     logger.info("Initiating model hot-swap/reload sequence...")
 
@@ -417,6 +481,10 @@ def reload_model() -> bool:
         logger.info("Unloading existing TTS model from memory...")
         del chatterbox_model
         chatterbox_model = None
+
+    # 1.5 Clear conditionals cache
+    _conditionals_cache.clear()
+    logger.info("Cleared pre-computed conditionals cache.")
 
     # 2. Reset state flags
     MODEL_LOADED = False

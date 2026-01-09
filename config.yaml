@@ -11,7 +11,7 @@ server:
 model:
   repo_id: chatterbox-turbo
 tts_engine:
-  device: cuda
+  device: mps
   predefined_voices_path: voices
   reference_audio_path: reference_audio
   default_voice_id: Emily.wav
@@ -31,35 +31,37 @@ audio_output:
   max_reference_duration_sec: 30
   save_to_disk: false
 ui_state:
-  last_text: '[gasp] Okay, we have fifteen minutes left! Fifteen minutes! [groan]
-    How have we been in here for forty-five minutes and only solved two puzzles?!
-    [clear throat] Let''s think logically. [sniff] This room smells like fear and
-    bad decisions. [cough] And also someone''s very strong cologne, Kevin. [sigh]
-    Okay, the clue says "the answer lies where time stands still." [chuckle] Great,
-    very helpful, very straightforward. [shush] Everyone stop talking for one second!
-    [gasp] Wait, the clock on the wall! It''s stuck at three fifteen! [laugh] That''s
-    it! That has to be it! [groan] It''s not the combination. Of course it''s not
-    the combination. [sniff] Why would anything in this room be logical? [sigh] Has
-    anyone checked under the carpet? [gasp] There''s a hidden compartment! [chuckle]
-    Kevin, you''re standing on a clue! Classic Kevin! [clear throat] Okay, it''s another
-    riddle. "What has keys but no locks, space but no room, and you can enter but
-    can''t go inside?" [groan] Who writes these things?! [cough] A keyboard! It''s
-    a keyboard! [laugh] There''s a keyboard painted on the wall! [gasp] Eight minutes!
-    We have eight minutes! [sigh] If we don''t escape this room, we''re never speaking
-    of this again. [shush] Focus, everyone! [chuckle] We''re so close I can taste
-    freedom! [sniff] That or more of Kevin''s cologne!
+  last_text: '[clear throat] Um, hi everyone. [cough] Excuse me. So, when Jessica
+    asked me to be her maid of honor, I cried. [laugh] Not graceful tears either,
+    like ugly sobbing. [sniff] We''ve been friends for fifteen years, and I cannot
+    believe we''re here today. [sigh] Okay, I promised myself I wouldn''t cry during
+    this speech, so let''s see how long that lasts. [chuckle] For those who don''t
+    know, I met Jessica in college when she accidentally set fire to our dorm microwave.
+    [gasp] It was a small fire! Very small! [laugh] And I knew right then that this
+    was someone who would keep life interesting. [groan] I was right, by the way.
+    Life with Jessica is never boring. [sniff] She once convinced me to do karaoke
+    at a biker bar. [cough] I do not want to talk about what we sang. [clear throat]
+    But here''s what I do want to say. [sigh] Jessica is the most loyal, the most
+    kind, and the most ridiculously stubborn person I know. [chuckle] Marcus, you''re
+    getting a good one, but also, good luck. [laugh] She will argue about pineapple
+    on pizza until her dying breath. [shush] But she loves with her whole heart, and
+    I know she loves you. [sniff] So please raise your glasses. [gasp] Wait, I''m
+    not done! [sigh] Sorry, I''m nervous. [clear throat] To Jessica and Marcus: may
+    your love be as enduring as Jessica''s grudge against that one restaurant that
+    got her order wrong in 2019. [laugh] She still won''t go back. [sniff] Cheers,
+    everyone!
 
     '
   last_voice_mode: predefined
   last_predefined_voice: Emily.wav
-  last_reference_file: Gianna.wav
-  last_seed: 3000
+  last_reference_file: mickeymouse.mp3
+  last_seed: 0
   last_chunk_size: 240
   last_split_text_enabled: true
   hide_chunk_warning: false
-  hide_generation_warning: false
-  theme: light
-  last_preset_name: "\u26A1 Turbo: Escape Room Panic"
+  hide_generation_warning: true
+  theme: dark
+  last_preset_name: "\u26A1 Turbo: Nervous Wedding Toast"
 ui:
   title: Chatterbox TTS Server
   show_language_select: true
